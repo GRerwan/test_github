@@ -9,7 +9,10 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
-
+import time
+import pvlib
+from pvlib.location import Location
+from pandas.plotting import register_matplotlib_converters
 
 #==============================================================================
 # affichage des courbes ghi et dhi
@@ -86,28 +89,15 @@ def affiche_courbe(name,df):
     plt.show()
     return 
     
+
+
+#______________________________________________________________________________
+# 
+# Suivre les intructions dans l'ordre 
+#______________________________________________________________________________
     
-#==============================================================================
-# Deletes data above the physical limit
-#==============================================================================
     
-def physic_limit(name_station, df_stations, df_geo):
-    """
-    Filter of data with physicals limits
-
-    Args:
-        name_station (str): Name of the station.
-        df_station (DataFrame): DataFrame containing irradiance data.
-        df_geo (DataFrame): DataFrame containing geographique data.
-        
-    Returns:
-        df_filter (DataFrame): DataFrame containing data valid with BSRN criteria.
-    """
-    df_filter=df_stations.copy()
-    return
-
-
-
+    
 
 #==============================================================================
 # show only one column of ghi and one column of dhi
@@ -135,3 +125,68 @@ def one_column_ghi_dhi(df_station):
     df = df.drop(columns=df.filter(like='GHI').columns)
     df = df.drop(columns=df.filter(like='DHI').columns)
     return df
+
+
+#==============================================================================
+# Estimation of DNI with GHI and DHI
+#==============================================================================
+
+
+def estimation_dni(df, df_geo, name_station, time_zone):
+    """
+    Estimation of DNI values with GHI and DHI
+
+    Args:
+        df (DataFrame): DataFrame containing irradiance data (GHI and DHI).
+        df_geo (DataFrame): DataFrame containing geographic data (Longitude, Latitude and Altitude).
+        name_station (str): Name of the station.
+        time_zone (str): time zone of station.
+        
+    Returns:
+        df_1 (DataFrame): DataFrame containing irradiance data (dhi ,dni, ghi, mu0, extra_radiation and zenith).
+    """
+    df_1 = df.copy() # copy to use new dataframe
+    df_1.index = pd.to_datetime(df_1.index) # conversion of index
+    good_data = df_geo.loc[df_geo.index[df_geo.index == f'{name_station}']] # select of geographic data of station
+    a = good_data[0]
+    # Definition of Location oject. Coordinates and elevation of La Plaine des Palmistes (Reunion)
+    site = Location(a.Latitude, a.Longitude, time_zone, a.Altitude, f'{name_station} (SWOI)') # latitude, longitude, time_zone, altitude, name
+    solpos = site.get_solarposition(df_1.index)
+    df_1['zenith'] = solpos['zenith']
+    df_1['extra_radiation'] = pvlib.irradiance.get_extra_radiation(df_1.index)
+    df_1['mu0'] = np.cos(np.deg2rad(df_1['zenith'])).clip(lower=0.1)
+    df_1['dni'] = (df_1['ghi'] - df_1['dhi'] ) / df_1['mu0']
+    return df_1
+
+
+#==============================================================================
+# Deletes data above the physical limit
+#==============================================================================
+
+
+def quality_of_bsrn(df):
+    """
+    Delete data that does not meet BSRN criteria
+
+    Args:
+        df (DataFrame): DataFrame containing irradiance data.
+        
+    Returns:
+        df_hourly_mean (DataFrame): DataFrame containing filter irradiance data with hourly mean.
+    """
+    # Crée une copie du DataFrame pour éviter de modifier les données d'origine
+    df_1 = df.copy()
+
+    # Remplacement des valeurs aberrantes par np.nan pour chaque mesure
+    # Pour 'ghi'
+    df_1.loc[(df_1['ghi'] < -4) | (df_1['ghi'] > 1.5 * df_1['extra_radiation'] * df_1['mu0']**1.2 + 100), 'ghi'] = np.nan
+    # Pour 'dhi'
+    df_1.loc[(df_1['dhi'] < -4) | (df_1['dhi'] > 0.95 * df_1['extra_radiation'] * df_1['mu0']**1.2 + 50), 'dhi'] = np.nan
+    # Pour 'dni'
+    df_1.loc[(df_1['dni'] < -4) | (df_1['dni'] > df_1['extra_radiation']), 'dni'] = np.nan
+
+    # Regrouper les données par heure et calculer la moyenne
+    df_hourly_mean = df_1.resample('H').mean()
+
+    # Renvoie le DataFrame avec les valeurs aberrantes remplacées par np.nan
+    return df_hourly_mean
